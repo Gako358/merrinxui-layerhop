@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: MerrinxUI Layer Hop
+## Author: merrinx
+## Version: 0.1.0
+## OptionalDeps: MerrinxUI
+## SavedVariables: MerrinxUI_LayerHopDB
+
+embeds.xml
+Host.lua
+LayerHopLogic.lua
+LayerHop.lua

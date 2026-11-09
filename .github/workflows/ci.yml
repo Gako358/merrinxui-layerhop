@@ -1,0 +1,46 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+permissions: {}
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: nix flake check --keep-going -L
+      - run: nix build .#release -L
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Check tag matches TOC version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=$(tr -d '\r' < MerrinxUI_LayerHop/MerrinxUI_LayerHop.toc | sed -n 's/^## Version:[[:space:]]*//p' | sed 's/[[:space:]]*$//' | head -n1)
+          if [ -z "$v" ]; then echo "no ## Version: line found in MerrinxUI_LayerHop/MerrinxUI_LayerHop.toc" >&2; exit 1; fi
+          case "$TAG" in "v$v"|"v$v"-*) ;; *) echo "tag $TAG does not match TOC version $v" >&2; exit 1 ;; esac
+      - name: Build and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          nix build .#release -L
+          cp result/MerrinxUI_LayerHop.zip "MerrinxUI_LayerHop-$TAG.zip"
+          pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+          gh release create "$TAG" "MerrinxUI_LayerHop-$TAG.zip" --repo "$GITHUB_REPOSITORY" --title "MerrinxUI_LayerHop $TAG" --generate-notes $pre
