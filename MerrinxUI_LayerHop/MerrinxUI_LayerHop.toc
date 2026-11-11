@@ -2,6 +2,7 @@
 ## Title: MerrinxUI Layer Hop
 ## Author: merrinx
 ## Version: 1.0.0
+## X-Curse-Project-ID: 1798762
 ## OptionalDeps: MerrinxUI
 ## SavedVariables: MerrinxUI_LayerHopDB
 
