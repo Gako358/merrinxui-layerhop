@@ -62,7 +62,7 @@ function L.Encode(kind, id, map, zone)
 	if kind == "P" then
 		return string.format("P|%d", id)
 	end
-	return string.format("%s|%d|%d|%d", kind, id, map, zone)
+	return string.format("%s|%d|%d|%d", kind, id, map or 0, zone or 0)
 end
 
 local function positive(text, max)
@@ -86,7 +86,13 @@ function L.Decode(text)
 	if not kind then
 		return nil
 	end
-	id, map, zone = positive(id, L.MAX_ID), positive(map), positive(zone)
+	id = positive(id, L.MAX_ID)
+	-- An offer carries 0 for a map or layer its host does not know.
+	if kind == "O" then
+		map, zone = tonumber(map), tonumber(zone)
+	else
+		map, zone = positive(map), positive(zone)
+	end
 	if not (id and map and zone) then
 		return nil
 	end
@@ -94,11 +100,20 @@ function L.Decode(text)
 end
 
 -- host: { hosting, grouped, instance, combat, map, zone }
+-- Layer UIDs only compare within one map, so a host elsewhere cannot rule itself out.
 function L.CanHost(host, request)
 	if not host.hosting or host.grouped or host.instance or host.combat then
 		return false
 	end
-	return host.zone ~= nil and host.map == request.map and host.zone ~= request.zone
+	return host.map ~= request.map or host.zone ~= request.zone
+end
+
+-- true when the offer is on another layer, false when on the same one, nil when unknown.
+function L.OtherLayer(request, offer)
+	if offer.map ~= request.map or offer.zone == 0 then
+		return nil
+	end
+	return offer.zone ~= request.zone
 end
 
 function L.ShortName(name)

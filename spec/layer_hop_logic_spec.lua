@@ -62,6 +62,12 @@ describe("LayerHopLogic", function()
 			assert.are.same({ kind = "P", id = 42 }, L.Decode(L.Encode("P", 42)))
 		end)
 
+		it("sends an unknown map or layer of an offer as 0", function()
+			assert.are.equal("O|42|1433|0", L.Encode("O", 42, 1433, nil))
+			assert.are.same({ kind = "O", id = 42, map = 0, zone = 0 }, L.Decode(L.Encode("O", 42, nil, nil)))
+			assert.is_nil(L.Decode("Q|42|1429|0"))
+		end)
+
 		it("rejects unknown kinds, bad numbers, extra fields and long text", function()
 			assert.is_nil(L.Decode("X|1|2|3"))
 			assert.is_nil(L.Decode("Q|0|2|3"))
@@ -88,13 +94,18 @@ describe("LayerHopLogic", function()
 			assert.is_true(L.CanHost(host, request))
 		end)
 
-		it("does not host the same layer, another map or an unknown layer", function()
+		it("does not host the same layer of the same map", function()
 			request.zone = 20
 			assert.is_false(L.CanHost(host, request))
-			request.zone, request.map = 10, 1433
-			assert.is_false(L.CanHost(host, request))
+		end)
+
+		it("hosts from another map or an unknown layer or map", function()
+			request.map = 1433
+			assert.is_true(L.CanHost(host, request))
 			request.map, host.zone = 1429, nil
-			assert.is_false(L.CanHost(host, request))
+			assert.is_true(L.CanHost(host, request))
+			host.map = nil
+			assert.is_true(L.CanHost(host, request))
 		end)
 
 		it("does not host when off, grouped, in an instance or in combat", function()
@@ -105,6 +116,21 @@ describe("LayerHopLogic", function()
 			end
 			host.hosting = false
 			assert.is_false(L.CanHost(host, request))
+		end)
+	end)
+
+	describe("OtherLayer", function()
+		local request = { map = 1429, zone = 10 }
+
+		it("confirms another layer only on the same map", function()
+			assert.is_true(L.OtherLayer(request, { map = 1429, zone = 20 }))
+			assert.is_false(L.OtherLayer(request, { map = 1429, zone = 10 }))
+		end)
+
+		it("cannot tell for another map or an unknown layer", function()
+			assert.is_nil(L.OtherLayer(request, { map = 1433, zone = 20 }))
+			assert.is_nil(L.OtherLayer(request, { map = 1429, zone = 0 }))
+			assert.is_nil(L.OtherLayer(request, { map = 0, zone = 0 }))
 		end)
 	end)
 

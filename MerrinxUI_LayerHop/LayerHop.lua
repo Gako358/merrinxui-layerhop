@@ -11,6 +11,7 @@ local JOIN_DELAY = 10
 local TICK = 1
 local COOLDOWN = 10
 local ASK_TIMEOUT = 10
+local CONFIRM_WAIT = 3
 local INVITE_TIMEOUT = 20
 local LAND_TIMEOUT = 60
 local OFFER_TTL = 30
@@ -245,7 +246,14 @@ function LayerHop:Hop()
 		return self:AskGeneral(map, zone)
 	end
 	self.stats.asked = self.stats.asked + 1
-	self:Start({ id = id, state = "asking", map = map, zone = zone, deadline = now + ASK_TIMEOUT })
+	self:Start({
+		id = id,
+		state = "asking",
+		map = map,
+		zone = zone,
+		fallbackAt = now + CONFIRM_WAIT,
+		deadline = now + ASK_TIMEOUT,
+	})
 	self:Say("looking for a player on another layer.")
 end
 
@@ -310,7 +318,16 @@ function LayerHop:OnTick()
 		return self:Finish()
 	end
 	self:Scan()
-	if self.hop ~= hop or GetTime() < hop.deadline then
+	if self.hop ~= hop then
+		return
+	end
+	local now = GetTime()
+	if hop.state == "asking" and hop.fallback and now >= hop.fallbackAt then
+		local host = hop.fallback
+		hop.fallback = nil
+		return self:Pick(hop, host)
+	end
+	if now < hop.deadline then
 		return
 	end
 	if hop.state == "asking" then
@@ -405,12 +422,21 @@ end
 
 function LayerHop:OnOffer(msg, sender)
 	local hop = self.hop
-	if not hop or hop.state ~= "asking" or msg.id ~= hop.id or msg.map ~= hop.map or msg.zone == hop.zone then
+	if not hop or hop.state ~= "asking" or msg.id ~= hop.id then
 		return
 	end
-	if send(L.Encode("P", hop.id), "WHISPER", sender) then
-		hop.state, hop.host, hop.deadline = "picked", sender, GetTime() + INVITE_TIMEOUT
-		self:Say("asking " .. sender .. " for an invite.")
+	local other = L.OtherLayer(hop, msg)
+	if other then
+		self:Pick(hop, sender)
+	elseif other == nil and not hop.fallback then
+		hop.fallback = sender
+	end
+end
+
+function LayerHop:Pick(hop, host)
+	if send(L.Encode("P", hop.id), "WHISPER", host) then
+		hop.state, hop.host, hop.deadline = "picked", host, GetTime() + INVITE_TIMEOUT
+		self:Say("asking " .. host .. " for an invite.")
 		self:Notify()
 	end
 end
@@ -483,7 +509,7 @@ function LayerHop:GetTabOptions()
 				type = "toggle",
 				name = "Help others hop",
 				order = 2,
-				desc = "Invite MerrinxUI users from other layers while you are solo and out of combat.",
+				desc = "Invite MerrinxUI users from other layers or zones while you are solo and out of combat.",
 				get = function()
 					return self.db.profile.host
 				end,
