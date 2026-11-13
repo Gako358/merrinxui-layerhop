@@ -44,3 +44,21 @@ jobs:
           cp result/MerrinxUI_LayerHop.zip "MerrinxUI_LayerHop-$TAG.zip"
           pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
           gh release create "$TAG" "MerrinxUI_LayerHop-$TAG.zip" --repo "$GITHUB_REPOSITORY" --title "MerrinxUI_LayerHop $TAG" --generate-notes $pre
+      - name: Upload to CurseForge
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          iface=$(tr -d '\r' < MerrinxUI_LayerHop/MerrinxUI_LayerHop.toc | sed -n 's/^## Interface:[[:space:]]*//p' | sed 's/[[:space:]]*$//' | head -n1)
+          project=$(tr -d '\r' < MerrinxUI_LayerHop/MerrinxUI_LayerHop.toc | sed -n 's/^## X-Curse-Project-ID:[[:space:]]*//p' | sed 's/[[:space:]]*$//' | head -n1)
+          case "$project" in ''|*[!0-9]*) echo "no numeric ## X-Curse-Project-ID: line found in MerrinxUI_LayerHop/MerrinxUI_LayerHop.toc" >&2; exit 1 ;; esac
+          gv="$((iface / 10000)).$((iface / 100 % 100)).$((iface % 100))"
+          ids=$(curl -sS --fail-with-body -H "X-Api-Token: $CF_API_KEY" https://wow.curseforge.com/api/game/versions | jq -c --arg gv "$gv" '[.[] | select(.name == $gv) | .id]')
+          if [ "$(jq length <<<"$ids")" != 1 ]; then echo "expected one CurseForge game version named $gv, got $ids" >&2; exit 1; fi
+          type=release; case "$TAG" in *-*) type=beta ;; esac
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > changelog.md
+          jq -n --arg name "MerrinxUI_LayerHop $TAG" --arg type "$type" --argjson ids "$ids" --rawfile changelog changelog.md \
+            '{displayName: $name, releaseType: $type, gameVersions: $ids, changelog: $changelog, changelogType: "markdown"}' > metadata.json
+          curl -sS --fail-with-body -H "X-Api-Token: $CF_API_KEY" -F "metadata=<metadata.json" -F "file=@MerrinxUI_LayerHop-$TAG.zip" \
+            "https://wow.curseforge.com/api/projects/$project/upload-file"
