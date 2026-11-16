@@ -1,17 +1,9 @@
 describe("LayerHopWindow", function()
 	local addonName = "MerrinxUI_LayerHop"
-	local realLibStub
-
-	before_each(function()
-		realLibStub = rawget(_G, "LibStub")
-	end)
-
-	after_each(function()
-		rawset(_G, "LibStub", realLibStub)
-	end)
 
 	local function loadWindow()
 		local ns = {}
+		assert(loadfile("MerrinxUI_LayerHop/Theme.lua"))(addonName, ns)
 		assert(loadfile("MerrinxUI_LayerHop/LayerHopWindow.lua"))(addonName, ns)
 		return ns.LayerHopWindow
 	end
@@ -129,115 +121,203 @@ describe("LayerHopWindow", function()
 	end)
 
 	describe("New", function()
-		local function newLibs()
-			local registerCalls = {}
-			local sizeCalls = {}
-			local openCalls = {}
-			local closeCalls = {}
-			local notifyCalls = {}
-			local openFrames = {}
+		local saved = {}
+		local created
 
-			local libs = {
-				["AceConfig-3.0"] = {
-					RegisterOptionsTable = function(_, name, fn)
-						registerCalls[#registerCalls + 1] = { name = name, fn = fn }
-					end,
-				},
-				["AceConfigDialog-3.0"] = {
-					SetDefaultSize = function(_, name, width, height)
-						sizeCalls[#sizeCalls + 1] = { name = name, width = width, height = height }
-					end,
-					Open = function(_, name)
-						openCalls[#openCalls + 1] = name
-						openFrames[name] = true
-					end,
-					Close = function(_, name)
-						closeCalls[#closeCalls + 1] = name
-						openFrames[name] = nil
-					end,
-					OpenFrames = openFrames,
-				},
-				["AceConfigRegistry-3.0"] = {
-					NotifyChange = function(_, name)
-						notifyCalls[#notifyCalls + 1] = name
-					end,
-				},
-			}
-			rawset(_G, "LibStub", function(major)
-				return libs[major]
+		local function noop() end
+
+		local methods = {}
+
+		local function newObject(kind, parent)
+			local o = { kind = kind, shown = true, enabled = true, scripts = {}, parent = parent }
+			created[#created + 1] = o
+			return setmetatable(o, {
+				__index = function(_, k)
+					return methods[k] or noop
+				end,
+			})
+		end
+
+		function methods:Show()
+			self.shown = true
+		end
+		function methods:Hide()
+			self.shown = false
+		end
+		function methods:IsShown()
+			return self.shown
+		end
+		function methods:IsVisible()
+			local o = self
+			while o do
+				if o.shown == false then
+					return false
+				end
+				o = o.parent
+			end
+			return true
+		end
+		function methods:SetScript(name, fn)
+			self.scripts[name] = fn
+		end
+		function methods:Enable()
+			self.enabled = true
+		end
+		function methods:Disable()
+			self.enabled = false
+		end
+		function methods:IsEnabled()
+			return self.enabled
+		end
+		function methods:SetText(text)
+			self.text = text
+		end
+		function methods:SetFont()
+			return true
+		end
+		function methods:SetHeight(h)
+			self.height = h
+		end
+		function methods:GetStringHeight()
+			return 14
+		end
+		function methods:GetStringWidth()
+			return 40
+		end
+		function methods:CreateTexture()
+			return newObject("Texture", self)
+		end
+		function methods:CreateFontString()
+			return newObject("FontString", self)
+		end
+
+		before_each(function()
+			created = {}
+			for _, name in ipairs({ "CreateFrame", "UIParent", "UISpecialFrames" }) do
+				saved[name] = rawget(_G, name)
+			end
+			rawset(_G, "UIParent", {})
+			rawset(_G, "UISpecialFrames", {})
+			rawset(_G, "CreateFrame", function(kind, name, parent)
+				local o = newObject(kind, parent)
+				o.name = name
+				return o
 			end)
+		end)
 
+		after_each(function()
+			for name, value in pairs(saved) do
+				rawset(_G, name, value)
+			end
+		end)
+
+		local function newModel()
 			return {
-				registerCalls = registerCalls,
-				sizeCalls = sizeCalls,
-				openCalls = openCalls,
-				closeCalls = closeCalls,
-				notifyCalls = notifyCalls,
-				openFrames = openFrames,
+				layerText = "layer text",
+				languageText = "language text",
+				status = "status text",
+				rows = {
+					{ label = "Layer 20: 1 answer", hosts = 1, target = { kind = "layer", zone = 20 } },
+				},
+				busy = false,
+				canAskGeneral = false,
+				statsText = "stats text",
 			}
 		end
 
-		it("registers and sizes once, opens every call, with a live options function", function()
+		local function visibleButton(label)
+			for _, o in ipairs(created) do
+				if o.kind == "Button" and o.label and o.label.text == label and o:IsVisible() then
+					return o
+				end
+			end
+			return nil
+		end
+
+		local function frameNamed(name)
+			for _, o in ipairs(created) do
+				if o.name == name then
+					return o
+				end
+			end
+		end
+
+		it("builds the frame once, registers it for Escape and renders the model", function()
 			local W = loadWindow()
-			local libs = newLibs()
-			local model = {
-				layerText = "layer text",
-				languageText = "",
-				status = "",
-				rows = {},
-				busy = false,
-				canAskGeneral = false,
-				statsText = "",
-			}
+			local model = newModel()
 			local feature = newFeature(model)
 			local window = W.New(feature)
 
+			assert.is_false(window:IsShown())
 			window:Open()
 			window:Open()
 
-			assert.are.equal(1, #libs.registerCalls)
-			assert.are.equal(W.APP, libs.registerCalls[1].name)
-			assert.are.equal(1, #libs.sizeCalls)
-			assert.are.same({ name = W.APP, width = 440, height = 420 }, libs.sizeCalls[1])
-			assert.are.equal(2, #libs.openCalls)
-			assert.are.equal(W.APP, libs.openCalls[1])
+			local count = 0
+			for _, o in ipairs(created) do
+				if o.name == W.FRAME then
+					count = count + 1
+				end
+			end
+			assert.are.equal(1, count)
+			assert.are.same({ W.FRAME }, UISpecialFrames)
+			assert.is_true(window:IsShown())
 
-			local result = libs.registerCalls[1].fn()
-			assert.are.equal(model.layerText, result.args.layer.name)
+			local texts = {}
+			for _, o in ipairs(created) do
+				if o.kind == "FontString" and o.text then
+					texts[o.text] = true
+				end
+			end
+			for _, text in ipairs({ "Layer Hop", "layer text", "language text", "status text", "stats text" }) do
+				assert.is_true(texts[text], text)
+			end
 
-			model.layerText = "changed"
-			local updated = libs.registerCalls[1].fn()
-			assert.are.equal("changed", updated.args.layer.name)
+			assert.is_not_nil(visibleButton("Hop to any other layer"))
+			assert.is_not_nil(visibleButton("Check again"))
+			assert.is_nil(visibleButton("Ask in General"))
+			assert.is_nil(visibleButton("Cancel"))
+
+			local row = visibleButton("Layer 20: 1 answer")
+			row.scripts.OnClick(row)
+			assert.are.equal(model.rows[1].target, feature.calls.hopTo)
+
+			local check = visibleButton("Check again")
+			check.scripts.OnClick(check)
+			assert.is_true(feature.calls.checkLayers)
 		end)
 
-		it("tracks IsShown from OpenFrames and only refreshes when shown", function()
+		it("re-renders on Refresh only while shown and reflects busy state", function()
 			local W = loadWindow()
-			local libs = newLibs()
-			local model = {
-				layerText = "",
-				languageText = "",
-				status = "",
-				rows = {},
-				busy = false,
-				canAskGeneral = false,
-				statsText = "",
-			}
+			local model = newModel()
 			local feature = newFeature(model)
 			local window = W.New(feature)
 
-			assert.is_false(window:IsShown())
 			window:Refresh()
-			assert.are.equal(0, #libs.notifyCalls)
+			assert.are.equal(0, #created)
 
 			window:Open()
-			assert.is_true(window:IsShown())
+			model.busy = true
+			model.rows = {}
+			model.status = "busy now"
 			window:Refresh()
-			assert.are.equal(1, #libs.notifyCalls)
-			assert.are.equal(W.APP, libs.notifyCalls[1])
+
+			assert.is_nil(visibleButton("Layer 20: 1 answer"))
+			assert.is_false(visibleButton("Hop to any other layer"):IsEnabled())
+			assert.is_false(visibleButton("Check again"):IsEnabled())
+			local cancel = visibleButton("Cancel")
+			assert.is_true(cancel:IsEnabled())
+			cancel.scripts.OnClick(cancel)
+			assert.is_true(feature.calls.cancel)
 
 			window:Close()
-			assert.are.equal(W.APP, libs.closeCalls[1])
 			assert.is_false(window:IsShown())
+			assert.is_false(frameNamed(W.FRAME):IsShown())
+
+			model.status = "hidden change"
+			window:Refresh()
+			for _, o in ipairs(created) do
+				assert.are_not.equal("hidden change", o.text)
+			end
 		end)
 	end)
 end)

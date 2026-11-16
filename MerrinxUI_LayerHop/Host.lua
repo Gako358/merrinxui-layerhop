@@ -32,6 +32,7 @@ ns.appName = ns.integrated and "MerrinxUI" or addonName
 ns.slashHint = ns.integrated and "/mui hop" or "/layerhop"
 ns.optionsHint = ns.integrated and "/mui > QoL > Layer Hop" or "/layerhop config"
 ns.Debug = (api and api.Debug) or { Log = noop, RegisterChecks = noop }
+ns.Theme = (api and api.Theme) or ns.Theme
 
 local feature
 local optionsRegistered = false
