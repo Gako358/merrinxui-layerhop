@@ -58,11 +58,15 @@ function L.Current(state, map)
 	return nil
 end
 
-function L.Encode(kind, id, map, zone)
+function L.Encode(kind, id, map, zone, locale)
 	if kind == "P" then
 		return string.format("P|%d", id)
 	end
-	return string.format("%s|%d|%d|%d", kind, id, map or 0, zone or 0)
+	local text = string.format("%s|%d|%d|%d", kind, id, map or 0, zone or 0)
+	if kind == "O" and type(locale) == "string" and locale:match("^%l%l%u%u$") then
+		text = text .. "|" .. locale
+	end
+	return text
 end
 
 local function positive(text, max)
@@ -82,7 +86,11 @@ function L.Decode(text)
 		local id = positive(pick, L.MAX_ID)
 		return id and { kind = "P", id = id } or nil
 	end
-	local kind, id, map, zone = text:match("^([QO])|(%d+)|(%d+)|(%d+)$")
+	local id, map, zone, locale = text:match("^O|(%d+)|(%d+)|(%d+)|(%l%l%u%u)$")
+	local kind = id and "O" or nil
+	if not kind then
+		kind, id, map, zone = text:match("^([QO])|(%d+)|(%d+)|(%d+)$")
+	end
 	if not kind then
 		return nil
 	end
@@ -96,7 +104,11 @@ function L.Decode(text)
 	if not (id and map and zone) then
 		return nil
 	end
-	return { kind = kind, id = id, map = map, zone = zone }
+	local msg = { kind = kind, id = id, map = map, zone = zone }
+	if kind == "O" then
+		msg.locale = locale
+	end
+	return msg
 end
 
 -- host: { hosting, grouped, instance, combat, map, zone }
@@ -167,4 +179,162 @@ function L.Prune(offers, now, ttl)
 		end
 	end
 	return count
+end
+
+local LANGUAGE_NAMES = {
+	enUS = "English",
+	enGB = "English",
+	deDE = "German",
+	frFR = "French",
+	esES = "Spanish",
+	esMX = "Spanish",
+	itIT = "Italian",
+	ptBR = "Portuguese",
+	ptPT = "Portuguese",
+	ruRU = "Russian",
+	koKR = "Korean",
+	zhCN = "Chinese",
+	zhTW = "Chinese",
+}
+
+-- Unmapped locale-shaped codes are returned as-is so same-locale clients still group together.
+function L.Language(locale)
+	if type(locale) ~= "string" then
+		return nil
+	end
+	local name = LANGUAGE_NAMES[locale]
+	if name then
+		return name
+	end
+	if locale:match("^%l%l%u%u$") then
+		return locale
+	end
+	return nil
+end
+
+function L.AddOffer(offers, offer, max)
+	if #offers >= max then
+		return false
+	end
+	for _, existing in ipairs(offers) do
+		if L.SameName(existing.sender, offer.sender) then
+			return false
+		end
+	end
+	offers[#offers + 1] = offer
+	return true
+end
+
+local function bySenderAsc(a, b)
+	return a.sender < b.sender
+end
+
+function L.Choose(offers, request, target, myLanguage, rand)
+	local ranks, sureFor
+
+	if target.kind == "layer" then
+		local candidates = {}
+		if target.zone ~= request.zone then
+			for _, offer in ipairs(offers) do
+				if offer.map == request.map and offer.zone == target.zone then
+					candidates[#candidates + 1] = offer
+				end
+			end
+		end
+		ranks, sureFor = { candidates }, { true }
+	elseif target.kind == "language" then
+		local confirmed, unknown = {}, {}
+		for _, offer in ipairs(offers) do
+			local other = L.OtherLayer(request, offer)
+			if offer.language == target.language and other ~= false then
+				if other == true then
+					confirmed[#confirmed + 1] = offer
+				else
+					unknown[#unknown + 1] = offer
+				end
+			end
+		end
+		ranks, sureFor = { confirmed, unknown }, { true, true }
+	else
+		local confirmed, foreignUnknown, otherUnknown = {}, {}, {}
+		for _, offer in ipairs(offers) do
+			local other = L.OtherLayer(request, offer)
+			if other ~= false then
+				local foreign = myLanguage ~= nil and offer.language ~= nil and offer.language ~= myLanguage
+				if other == true then
+					confirmed[#confirmed + 1] = offer
+				elseif foreign then
+					foreignUnknown[#foreignUnknown + 1] = offer
+				else
+					otherUnknown[#otherUnknown + 1] = offer
+				end
+			end
+		end
+		ranks, sureFor = { confirmed, foreignUnknown, otherUnknown }, { true, false, false }
+	end
+
+	for i, candidates in ipairs(ranks) do
+		if #candidates > 0 then
+			table.sort(candidates, bySenderAsc)
+			return candidates[rand(1, #candidates)].sender, sureFor[i]
+		end
+	end
+	return nil, false
+end
+
+function L.Rows(offers, request, myLanguage)
+	local byZone, zones = {}, {}
+	local byLanguage, languages = {}, {}
+
+	for _, offer in ipairs(offers) do
+		if offer.map == request.map and offer.zone ~= 0 and offer.zone ~= request.zone then
+			local group = byZone[offer.zone]
+			if not group then
+				group = {}
+				byZone[offer.zone] = group
+				zones[#zones + 1] = offer.zone
+			end
+			group[#group + 1] = offer
+		end
+		local foreign = myLanguage ~= nil and offer.language ~= nil and offer.language ~= myLanguage
+		if foreign and L.OtherLayer(request, offer) == nil then
+			local group = byLanguage[offer.language]
+			if not group then
+				group = {}
+				byLanguage[offer.language] = group
+				languages[#languages + 1] = offer.language
+			end
+			group[#group + 1] = offer
+		end
+	end
+
+	table.sort(zones)
+	table.sort(languages)
+
+	local rows = {}
+	for _, zone in ipairs(zones) do
+		local group = byZone[zone]
+		local n = #group
+		local seen, known = {}, {}
+		for _, offer in ipairs(group) do
+			if offer.language and not seen[offer.language] then
+				seen[offer.language] = true
+				known[#known + 1] = offer.language
+			end
+		end
+		table.sort(known)
+		local label = string.format("Layer %d: %d %s", zone, n, n == 1 and "answer" or "answers")
+		if #known > 0 then
+			label = label .. " (" .. table.concat(known, ", ") .. ")"
+		end
+		rows[#rows + 1] = { label = label, hosts = n, target = { kind = "layer", zone = zone } }
+	end
+
+	for _, language in ipairs(languages) do
+		local n = #byLanguage[language]
+		local label = string.format("%s client, layer unknown: %d %s", language, n, n == 1 and "answer" or "answers")
+		rows[#rows + 1] = { label = label, hosts = n, target = { kind = "language", language = language } }
+	end
+
+	return rows
 end

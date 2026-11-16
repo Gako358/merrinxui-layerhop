@@ -179,7 +179,7 @@ describe("Host", function()
 			assert.are.equal("hop", env.host.slashVerb)
 
 			local hopped = false
-			obj.Hop = function()
+			obj.ToggleWindow = function()
 				hopped = true
 			end
 			env.host.slashHandler()
@@ -259,7 +259,7 @@ describe("Host", function()
 			local ns = loadHost()
 			local obj = ns.NewFeature("LayerHop", "AceEvent-3.0")
 			local hopped = false
-			obj.Hop = function()
+			obj.ToggleWindow = function()
 				hopped = true
 			end
 

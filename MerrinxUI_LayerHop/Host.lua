@@ -4,7 +4,7 @@ local MODULE = "LayerHop"
 local SV = "MerrinxUI_LayerHopDB"
 local VERB = "hop"
 local COMMAND = "layerhop"
-local ACTION = "Hop"
+local ACTION = "ToggleWindow"
 local OPTIONS = "GetTabOptions"
 
 assert(addonName == "MerrinxUI_" .. MODULE, "addonName mismatch")

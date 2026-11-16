@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 local L = ns.LayerHopLogic
 
-BINDING_NAME_MERRINXUI_LAYERHOP = "Hop to another layer"
+BINDING_NAME_MERRINXUI_LAYERHOP = "Toggle the layer hop window"
 BINDING_HEADER_MERRINXUI_LAYERHOP = "MerrinxUI Layer Hop"
 
 local PAGE = "Layer Hop"
@@ -20,6 +20,8 @@ local MAX_WHISPERS = 8
 local GENERAL_WINDOW = 30
 local GENERAL_TIMEOUT = 60
 local GENERAL_TEXT = "Could someone on another layer /inv me for a layer hop? I leave right after, thanks!"
+local SURVEY_TTL = 25
+local SURVEY_MAX = 40
 
 if ns.inert then
 	return
@@ -67,12 +69,41 @@ local function inInstance()
 	return plain(IsInInstance()) == true
 end
 
+local function layerLine(self)
+	local map, zone = self:CurrentLayer()
+	if zone then
+		local info = C_Map.GetMapInfo(map)
+		return "Current layer  |cffffffff" .. zone .. (info and (" in " .. info.name) or "") .. "|r"
+	end
+	return "Current layer  |cffffffffunknown, target or mouse over an NPC|r"
+end
+
+local function currentSurvey(self, map, zone)
+	local s = self.survey
+	if s and s.map == map and s.zone == zone then
+		return s
+	end
+	return nil
+end
+
+local function canAskGeneral(hop, generalUntil, now, survey)
+	if hop then
+		return false
+	end
+	if generalUntil and now < generalUntil then
+		return true
+	end
+	return survey ~= nil and survey.routes == 0
+end
+
 function LayerHop:OnInitialize()
 	self.db = ns.NewDB("LayerHop", defaults)
 	self:SetEnabledState(self.db.profile.enabled)
 	self.layer = L.NewLayer()
 	self.offers = {}
 	self.stats = { asked = 0, offers = 0, invites = 0, hops = 0 }
+	self.language = L.Language(GetLocale())
+	self.window = ns.LayerHopWindow.New(self)
 end
 
 function LayerHop:OnEnable()
@@ -97,6 +128,8 @@ function LayerHop:OnDisable()
 		self.joinTimer = nil
 	end
 	self:Finish()
+	self.window:Close()
+	self.survey = nil
 	if GetChannelName(CHANNEL) ~= 0 then
 		LeaveChannelByName(CHANNEL)
 	end
@@ -116,6 +149,7 @@ end
 
 function LayerHop:Notify()
 	ns.NotifyOptions(PAGE)
+	self.window:Refresh()
 end
 
 function LayerHop:JoinChannel()
@@ -211,16 +245,85 @@ function LayerHop:Broadcast(text)
 	return routes
 end
 
-function LayerHop:Hop()
+function LayerHop:ToggleWindow()
+	if not self:IsEnabled() then
+		return self:Say("turned off in " .. ns.optionsHint .. ".")
+	end
+	if self.window:IsShown() then
+		return self.window:Close()
+	end
+	self:OpenWindow()
+end
+
+function LayerHop:OpenWindow()
+	self:Scan()
+	self.window:Open()
+	self:MaybeSurvey()
+end
+
+function LayerHop:Survey(map, zone)
+	local now = GetTime()
+	local id = math.random(1, L.MAX_ID)
+	local routes = self:Broadcast(L.Encode("Q", id, map, zone))
+	self.lastAsk = now
+	local survey = { id = id, map = map, zone = zone, at = now, routes = routes, offers = {}, excluded = {} }
+	self.survey = survey
+	if routes > 0 then
+		self.stats.asked = self.stats.asked + 1
+	end
+	C_Timer.After(CONFIRM_WAIT, function()
+		if self.survey == survey then
+			self:Notify()
+		end
+	end)
+	self:Notify()
+	return survey
+end
+
+function LayerHop:MaybeSurvey()
+	if not self:IsEnabled() or self.hop or inInstance() then
+		return
+	end
+	local map, zone = self:CurrentLayer()
+	if not zone then
+		return
+	end
+	local now = GetTime()
+	local s = self.survey
+	if s and s.map == map and s.zone == zone and now - s.at <= SURVEY_TTL then
+		return
+	end
+	if self.lastAsk and now - self.lastAsk < COOLDOWN then
+		return
+	end
+	self:Survey(map, zone)
+end
+
+function LayerHop:CheckLayers()
+	if self.hop then
+		return self:Say("already looking for another layer.")
+	end
+	self:Scan()
+	local map, zone = self:CurrentLayer()
+	if not zone then
+		return self:Say("layer unknown. Target or mouse over an NPC first.")
+	end
+	if inInstance() then
+		return self:Say("layers only exist in the open world.")
+	end
+	local now = GetTime()
+	if self.lastAsk and now - self.lastAsk < COOLDOWN then
+		return self:Say(string.format("wait %d more seconds.", math.ceil(COOLDOWN - (now - self.lastAsk))))
+	end
+	self:Survey(map, zone)
+end
+
+function LayerHop:HopTo(target)
 	if not self:IsEnabled() then
 		return self:Say("turned off in " .. ns.optionsHint .. ".")
 	end
 	if self.hop then
 		return self:Say("already looking for another layer.")
-	end
-	local now = GetTime()
-	if self.lastAsk and now - self.lastAsk < COOLDOWN then
-		return self:Say(string.format("wait %d more seconds.", math.ceil(COOLDOWN - (now - self.lastAsk))))
 	end
 	if IsInGroup() then
 		return self:Say("leave your group first.")
@@ -237,29 +340,85 @@ function LayerHop:Hop()
 		return self:Say("layer unknown. Target or mouse over an NPC first.")
 	end
 
-	self.lastAsk = now
-	if self.generalUntil and now < self.generalUntil then
-		return self:AskGeneral(map, zone)
+	local now = GetTime()
+	local s = self.survey
+	if s and s.map == map and s.zone == zone and now - s.at <= SURVEY_TTL then
+		if s.routes == 0 then
+			if target.kind == "any" then
+				self:AskGeneral(map, zone)
+			else
+				self:OfferGeneral("could not reach other MerrinxUI users.")
+			end
+			return
+		end
+		local sender, sure = L.Choose(s.offers, { map = map, zone = zone }, target, self.language, math.random)
+		local age = now - s.at
+		if sender and (sure or now >= s.at + CONFIRM_WAIT) then
+			self:Start({
+				id = s.id,
+				state = "asking",
+				map = map,
+				zone = zone,
+				target = target,
+				fallbackAt = now,
+				deadline = now + ASK_TIMEOUT,
+			})
+			self:Pick(self.hop, sender)
+			return
+		elseif age < ASK_TIMEOUT then
+			self:Start({
+				id = s.id,
+				state = "asking",
+				map = map,
+				zone = zone,
+				target = target,
+				fallbackAt = s.at + CONFIRM_WAIT,
+				deadline = s.at + ASK_TIMEOUT,
+			})
+			self:Say("looking for a player on another layer.")
+			return
+		end
 	end
-	local id = math.random(1, L.MAX_ID)
-	if self:Broadcast(L.Encode("Q", id, map, zone)) == 0 then
-		return self:AskGeneral(map, zone)
+
+	if self.lastAsk and now - self.lastAsk < COOLDOWN then
+		return self:Say(string.format("wait %d more seconds.", math.ceil(COOLDOWN - (now - self.lastAsk))))
 	end
-	self.stats.asked = self.stats.asked + 1
+	s = self:Survey(map, zone)
+	if s.routes == 0 then
+		if target.kind == "any" then
+			self:AskGeneral(map, zone)
+		else
+			self:OfferGeneral("could not reach other MerrinxUI users.")
+		end
+		return
+	end
 	self:Start({
-		id = id,
+		id = s.id,
 		state = "asking",
 		map = map,
 		zone = zone,
+		target = target,
 		fallbackAt = now + CONFIRM_WAIT,
 		deadline = now + ASK_TIMEOUT,
 	})
 	self:Say("looking for a player on another layer.")
 end
 
+function LayerHop:Evaluate(hop)
+	local offers = (self.survey and self.survey.id == hop.id) and self.survey.offers or {}
+	local sender, sure = L.Choose(offers, { map = hop.map, zone = hop.zone }, hop.target, self.language, math.random)
+	if sender and (sure or GetTime() >= hop.fallbackAt) then
+		self:Pick(hop, sender)
+	end
+end
+
 -- Chat channels only accept messages sent during a key press or click, so this has to run
--- straight from Hop and never from a timer.
+-- straight from a click and never from a timer.
 function LayerHop:AskGeneral(map, zone)
+	local now = GetTime()
+	if self.lastGeneral and now - self.lastGeneral < COOLDOWN then
+		return self:Say(string.format("wait %d more seconds.", math.ceil(COOLDOWN - (now - self.lastGeneral))))
+	end
 	self.generalUntil = nil
 	local channel = plain(C_ChatInfo.GetGeneralChannelLocalID())
 	if type(channel) ~= "number" then
@@ -270,7 +429,8 @@ function LayerHop:AskGeneral(map, zone)
 		ns.Debug:Log("LayerHop", "general failed", err)
 		return self:Say("could not post in General.")
 	end
-	self:Start({ state = "public", map = map, zone = zone, deadline = GetTime() + GENERAL_TIMEOUT })
+	self.lastGeneral = now
+	self:Start({ state = "public", map = map, zone = zone, deadline = now + GENERAL_TIMEOUT })
 	self:Say("asked in General for an invite.")
 end
 
@@ -284,11 +444,20 @@ end
 
 function LayerHop:OfferGeneral(text)
 	self.generalUntil = GetTime() + GENERAL_WINDOW
-	self:Finish(string.format("%s Press hop again within %d seconds to ask in General.", text, GENERAL_WINDOW))
+	local message = string.format("%s Use Ask in General in the hop window within %d seconds.", text, GENERAL_WINDOW)
+	if self.hop then
+		self:Finish(message)
+	else
+		self:Say(message)
+	end
+	C_Timer.After(GENERAL_WINDOW, function()
+		self:Notify()
+	end)
+	self:Notify()
 end
 
 function LayerHop:BindingHop()
-	self:Hop()
+	self:ToggleWindow()
 end
 
 function LayerHop:Finish(text)
@@ -322,10 +491,11 @@ function LayerHop:OnTick()
 		return
 	end
 	local now = GetTime()
-	if hop.state == "asking" and hop.fallback and now >= hop.fallbackAt then
-		local host = hop.fallback
-		hop.fallback = nil
-		return self:Pick(hop, host)
+	if hop.state == "asking" then
+		self:Evaluate(hop)
+		if self.hop ~= hop or hop.state ~= "asking" then
+			return
+		end
 	end
 	if now < hop.deadline then
 		return
@@ -343,15 +513,19 @@ function LayerHop:OnTick()
 end
 
 function LayerHop:OnLayerChanged()
-	local hop = self.hop
-	if not hop or hop.state ~= "joined" then
-		return
-	end
 	local map, zone = self:CurrentLayer()
-	if map == hop.map and zone and zone ~= hop.zone then
+	local s = self.survey
+	if s and (s.map ~= map or s.zone ~= zone) then
+		self.survey = nil
+	end
+	local hop = self.hop
+	if hop and hop.state == "joined" and map == hop.map and zone and zone ~= hop.zone then
 		self.stats.hops = self.stats.hops + 1
 		self:Leave()
 		self:Finish("moved to layer " .. zone .. ".")
+	end
+	if self.window:IsShown() then
+		self:MaybeSurvey()
 	end
 end
 
@@ -402,7 +576,7 @@ function LayerHop:OnAddonMessage(_, prefix, text, _, sender)
 end
 
 function LayerHop:OnQuery(msg, sender)
-	if self.hop or L.Prune(self.offers, GetTime(), OFFER_TTL) >= MAX_OFFERS then
+	if self.hop or self.offers[msg.id] or L.Prune(self.offers, GetTime(), OFFER_TTL) >= MAX_OFFERS then
 		return
 	end
 	local map, zone = self:CurrentLayer()
@@ -414,26 +588,38 @@ function LayerHop:OnQuery(msg, sender)
 		map = map,
 		zone = zone,
 	}
-	if L.CanHost(host, msg) and send(L.Encode("O", msg.id, map, zone), "WHISPER", sender) then
+	if L.CanHost(host, msg) and send(L.Encode("O", msg.id, map, zone, GetLocale()), "WHISPER", sender) then
 		self.offers[msg.id] = { sender = sender, at = GetTime() }
 		self.stats.offers = self.stats.offers + 1
 	end
 end
 
 function LayerHop:OnOffer(msg, sender)
-	local hop = self.hop
-	if not hop or hop.state ~= "asking" or msg.id ~= hop.id then
+	local s = self.survey
+	if not s or msg.id ~= s.id or s.excluded[L.ShortName(sender)] then
 		return
 	end
-	local other = L.OtherLayer(hop, msg)
-	if other then
-		self:Pick(hop, sender)
-	elseif other == nil and not hop.fallback then
-		hop.fallback = sender
+	local offer = { sender = sender, map = msg.map, zone = msg.zone, language = L.Language(msg.locale) }
+	if not L.AddOffer(s.offers, offer, SURVEY_MAX) then
+		return
 	end
+	local hop = self.hop
+	if hop and hop.state == "asking" and hop.id == s.id then
+		self:Evaluate(hop)
+	end
+	self:Notify()
 end
 
 function LayerHop:Pick(hop, host)
+	local s = self.survey
+	if s then
+		for i = #s.offers, 1, -1 do
+			if L.SameName(s.offers[i].sender, host) then
+				table.remove(s.offers, i)
+			end
+		end
+		s.excluded[L.ShortName(host)] = true
+	end
 	if send(L.Encode("P", hop.id), "WHISPER", host) then
 		hop.state, hop.host, hop.deadline = "picked", host, GetTime() + INVITE_TIMEOUT
 		self:Say("asking " .. host .. " for an invite.")
@@ -455,6 +641,37 @@ function LayerHop:OnPick(msg, sender)
 	self:Say("inviting " .. sender .. " so they can change layer.")
 end
 
+function LayerHop:AskGeneralNow()
+	if self.hop then
+		return self:Say("already looking for another layer.")
+	end
+	if IsInGroup() then
+		return self:Say("leave your group first.")
+	end
+	if inInstance() then
+		return self:Say("layers only exist in the open world.")
+	end
+	if InCombatLockdown() then
+		return self:Say("you can't change layer in combat.")
+	end
+	local map, zone = self:CurrentLayer()
+	if not zone then
+		return self:Say("layer unknown. Target or mouse over an NPC first.")
+	end
+	if not canAskGeneral(self.hop, self.generalUntil, GetTime(), currentSurvey(self, map, zone)) then
+		return self:Say("try a hop first.")
+	end
+	self:AskGeneral(map, zone)
+end
+
+function LayerHop:Cancel()
+	local hop = self.hop
+	if hop and (hop.state == "accepted" or hop.state == "joined") then
+		self:Leave()
+	end
+	self:Finish("cancelled.")
+end
+
 local STATUS = {
 	asking = "Looking for a player on another layer...",
 	picked = "Waiting for an invite...",
@@ -464,14 +681,8 @@ local STATUS = {
 }
 
 function LayerHop:StatusText()
-	local map, zone = self:CurrentLayer()
 	local lines = {}
-	if zone then
-		local info = C_Map.GetMapInfo(map)
-		lines[1] = "Current layer  |cffffffff" .. zone .. (info and (" in " .. info.name) or "") .. "|r"
-	else
-		lines[1] = "Current layer  |cffffffffunknown, target or mouse over an NPC|r"
-	end
+	lines[1] = layerLine(self)
 	local channel = GetChannelName(CHANNEL)
 	local route
 	if channel == 0 then
@@ -486,6 +697,45 @@ function LayerHop:StatusText()
 	lines[4] =
 		string.format("This session  |cffffffff%d hops, %d players helped|r", self.stats.hops, self.stats.invites)
 	return table.concat(lines, "\n")
+end
+
+function LayerHop:WindowModel()
+	local map, zone = self:CurrentLayer()
+	local now = GetTime()
+	local hop = self.hop
+	local s = currentSurvey(self, map, zone)
+
+	local status
+	if hop then
+		status = STATUS[hop.state]
+	elseif not zone then
+		status = "Target or mouse over an NPC to read your layer."
+	elseif not s then
+		status = "Press Check again to ask other MerrinxUI users."
+	elseif s.routes == 0 then
+		status = "Could not reach other MerrinxUI users."
+	elseif now - s.at < CONFIRM_WAIT then
+		status = "Asking other MerrinxUI users..."
+	elseif #s.offers == 0 then
+		status = "Nobody answered."
+	else
+		local n = #s.offers
+		status = string.format("%d player%s answered.", n, n == 1 and "" or "s")
+	end
+
+	return {
+		layerText = layerLine(self),
+		languageText = string.format(
+			"Your client language: %s. Forever groups layers by Preferred Online Language "
+				.. "(Options > System > Languages and Social).",
+			self.language or "unknown"
+		),
+		status = status,
+		rows = s and L.Rows(s.offers, { map = map, zone = zone }, self.language) or {},
+		busy = hop ~= nil,
+		canAskGeneral = canAskGeneral(hop, self.generalUntil, now, s),
+		statsText = string.format("This session: %d hops, %d players helped", self.stats.hops, self.stats.invites),
+	}
 end
 
 function LayerHop:GetTabOptions()
@@ -519,15 +769,15 @@ function LayerHop:GetTabOptions()
 			},
 			hop = {
 				type = "execute",
-				name = "Hop layer",
+				name = "Open hop window",
 				order = 3,
-				desc = "Joins a MerrinxUI user on another layer, then leaves the group once the layer has changed. "
-					.. "If none answers, pressing again asks in General and accepts the first invite.",
+				desc = "Opens the layer hop window, which shows your current layer, client language and lets "
+					.. "you hop to another layer.",
 				disabled = function()
-					return not self:IsEnabled() or self.hop ~= nil
+					return not self:IsEnabled()
 				end,
 				func = function()
-					self:Hop()
+					self:OpenWindow()
 				end,
 			},
 			statusHeader = { type = "header", name = "Status", order = 10 },
@@ -546,7 +796,7 @@ function LayerHop:GetTabOptions()
 					local key = GetBindingKey("MERRINXUI_LAYERHOP")
 					local bound = key and ("Bound to |cffffffff" .. GetBindingText(key) .. "|r. ") or "Not bound. "
 					return bound
-						.. "Set it under Options > Key Bindings > AddOns > MerrinxUI Layer Hop > Hop to another layer, "
+						.. "Set it under Options > Key Bindings > AddOns > MerrinxUI Layer Hop > Toggle the layer hop window, "
 						.. "or use "
 						.. ns.slashHint
 						.. "."

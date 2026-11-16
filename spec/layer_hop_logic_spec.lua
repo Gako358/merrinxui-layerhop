@@ -80,6 +80,245 @@ describe("LayerHopLogic", function()
 			assert.is_nil(L.Decode("Q|1|2|" .. string.rep("9", 80)))
 			assert.is_nil(L.Decode(nil))
 		end)
+
+		it("keeps the prefix for 1.0.1 interop", function()
+			assert.are.equal("MUIHop1", L.PREFIX)
+		end)
+
+		it("appends a locale to an offer only when it matches the locale shape", function()
+			assert.are.equal("O|42|1429|20|frFR", L.Encode("O", 42, 1429, 20, "frFR"))
+			assert.are.equal("O|42|1429|20", L.Encode("O", 42, 1429, 20, "bad"))
+			assert.are.equal("Q|42|1429|10", L.Encode("Q", 42, 1429, 10, "frFR"))
+		end)
+
+		it("decodes a 5-field offer locale and keeps 4-field offers without a locale key", function()
+			assert.are.same(
+				{ kind = "O", id = 42, map = 1429, zone = 20, locale = "frFR" },
+				L.Decode("O|42|1429|20|frFR")
+			)
+			assert.are.same({ kind = "O", id = 42, map = 0, zone = 0, locale = "deDE" }, L.Decode("O|42|0|0|deDE"))
+		end)
+
+		it("rejects a malformed or extra locale field and a locale on a query", function()
+			assert.is_nil(L.Decode("O|42|1429|20|fr"))
+			assert.is_nil(L.Decode("O|42|1429|20|FRFR"))
+			assert.is_nil(L.Decode("O|42|1429|20|frFR|x"))
+			assert.is_nil(L.Decode("Q|1|2|3|frFR"))
+		end)
+	end)
+
+	describe("Language", function()
+		it("maps known locales to a language name", function()
+			assert.are.equal("English", L.Language("enUS"))
+			assert.are.equal("English", L.Language("enGB"))
+			assert.are.equal("French", L.Language("frFR"))
+			assert.are.equal("Spanish", L.Language("esMX"))
+			assert.are.equal("German", L.Language("deDE"))
+		end)
+
+		it("returns an unmapped locale-shaped code as itself", function()
+			assert.are.equal("xxYY", L.Language("xxYY"))
+		end)
+
+		it("returns nil for nil or malformed locales", function()
+			assert.is_nil(L.Language(nil))
+			assert.is_nil(L.Language("french"))
+			assert.is_nil(L.Language(""))
+		end)
+	end)
+
+	describe("AddOffer", function()
+		it("appends to an empty list", function()
+			local offers = {}
+			assert.is_true(L.AddOffer(offers, { sender = "A" }, 40))
+			assert.are.equal(1, #offers)
+		end)
+
+		it("rejects a duplicate sender by short name", function()
+			local offers = { { sender = "A-Realm" } }
+			assert.is_false(L.AddOffer(offers, { sender = "a" }, 40))
+		end)
+
+		it("rejects once the list is at max", function()
+			local offers = { { sender = "A" }, { sender = "B" } }
+			assert.is_false(L.AddOffer(offers, { sender = "C" }, 2))
+		end)
+	end)
+
+	describe("Choose", function()
+		local req = { map = 1429, zone = 10 }
+		local me = "English"
+		local first = function(m)
+			return m
+		end
+		local last = function(_, n)
+			return n
+		end
+		local A, B, C, D, E, F, G
+
+		before_each(function()
+			A = { sender = "A", map = 1429, zone = 20, language = "English" }
+			B = { sender = "B", map = 1429, zone = 20, language = "French" }
+			C = { sender = "C", map = 1429, zone = 30, language = nil }
+			D = { sender = "D", map = 1433, zone = 99, language = "French" }
+			E = { sender = "E", map = 1429, zone = 0, language = "German" }
+			F = { sender = "F", map = 1433, zone = 5, language = "English" }
+			G = { sender = "G", map = 1429, zone = 10, language = "French" }
+		end)
+
+		it("picks a confirmed host on the requested layer", function()
+			local sender, sure = L.Choose({ A, B, C, D, E, F, G }, req, { kind = "layer", zone = 20 }, me, first)
+			assert.are.equal("A", sender)
+			assert.is_true(sure)
+		end)
+
+		it("refuses a layer target matching the requester's own layer", function()
+			local sender, sure = L.Choose({ A, B, C, D, E, F, G }, req, { kind = "layer", zone = 10 }, me, first)
+			assert.is_nil(sender)
+			assert.is_false(sure)
+		end)
+
+		it("picks a confirmed host of the requested language", function()
+			local sender, sure = L.Choose(
+				{ A, B, C, D, E, F, G },
+				req,
+				{ kind = "language", language = "French" },
+				me,
+				first
+			)
+			assert.are.equal("B", sender)
+			assert.is_true(sure)
+		end)
+
+		it("picks an unknown-layer host of the requested language", function()
+			local sender, sure = L.Choose(
+				{ A, B, C, D, E, F, G },
+				req,
+				{ kind = "language", language = "German" },
+				me,
+				first
+			)
+			assert.are.equal("E", sender)
+			assert.is_true(sure)
+		end)
+
+		it("finds nobody for a language with no matching offer", function()
+			local sender, sure = L.Choose(
+				{ A, B, C, D, E, F, G },
+				req,
+				{ kind = "language", language = "Italian" },
+				me,
+				first
+			)
+			assert.is_nil(sender)
+			assert.is_false(sure)
+		end)
+
+		it("picks a confirmed host first for any target", function()
+			local sender, sure = L.Choose({ A, B, C, D, E, F, G }, req, { kind = "any" }, me, first)
+			assert.are.equal("A", sender)
+			assert.is_true(sure)
+		end)
+
+		it("uses rand across the whole confirmed rank", function()
+			local sender, sure = L.Choose({ A, B, C, D, E, F, G }, req, { kind = "any" }, me, last)
+			assert.are.equal("C", sender)
+			assert.is_true(sure)
+		end)
+
+		it("falls back to a foreign-language unknown-layer host", function()
+			local sender, sure = L.Choose({ D, F }, req, { kind = "any" }, me, first)
+			assert.are.equal("D", sender)
+			assert.is_false(sure)
+		end)
+
+		it("treats every unknown-layer host as foreign when the client language is unknown", function()
+			local sender, sure = L.Choose({ D, F }, req, { kind = "any" }, nil, first)
+			assert.are.equal("D", sender)
+			assert.is_false(sure)
+		end)
+
+		it("falls back to an unknown-layer host of the same language", function()
+			local sender, sure = L.Choose({ F }, req, { kind = "any" }, me, first)
+			assert.are.equal("F", sender)
+			assert.is_false(sure)
+		end)
+
+		it("excludes a confirmed same-layer host from any target", function()
+			local sender, sure = L.Choose({ G }, req, { kind = "any" }, me, first)
+			assert.is_nil(sender)
+			assert.is_false(sure)
+		end)
+
+		it("finds nobody with no offers", function()
+			local sender, sure = L.Choose({}, req, { kind = "any" }, me, first)
+			assert.is_nil(sender)
+			assert.is_false(sure)
+		end)
+
+		it("calls rand exactly once when a sender is returned", function()
+			local calls = 0
+			local rand = function(m, _)
+				calls = calls + 1
+				return m
+			end
+			L.Choose({ A, B, C, D, E, F, G }, req, { kind = "any" }, me, rand)
+			assert.are.equal(1, calls)
+		end)
+	end)
+
+	describe("Rows", function()
+		local req = { map = 1429, zone = 10 }
+		local me = "English"
+		local A, B, C, D, E, F, G
+
+		before_each(function()
+			A = { sender = "A", map = 1429, zone = 20, language = "English" }
+			B = { sender = "B", map = 1429, zone = 20, language = "French" }
+			C = { sender = "C", map = 1429, zone = 30, language = nil }
+			D = { sender = "D", map = 1433, zone = 99, language = "French" }
+			E = { sender = "E", map = 1429, zone = 0, language = "German" }
+			F = { sender = "F", map = 1433, zone = 5, language = "English" }
+			G = { sender = "G", map = 1429, zone = 10, language = "French" }
+		end)
+
+		it("lists layer rows then foreign-language unknown-layer rows", function()
+			local rows = L.Rows({ A, B, C, D, E, F, G }, req, me)
+			assert.are.same({
+				{
+					label = "Layer 20: 2 answers (English, French)",
+					hosts = 2,
+					target = { kind = "layer", zone = 20 },
+				},
+				{ label = "Layer 30: 1 answer", hosts = 1, target = { kind = "layer", zone = 30 } },
+				{
+					label = "French client, layer unknown: 1 answer",
+					hosts = 1,
+					target = { kind = "language", language = "French" },
+				},
+				{
+					label = "German client, layer unknown: 1 answer",
+					hosts = 1,
+					target = { kind = "language", language = "German" },
+				},
+			}, rows)
+		end)
+
+		it("omits language rows when the client language is unknown", function()
+			local rows = L.Rows({ A, B, C, D, E, F, G }, req, nil)
+			assert.are.same({
+				{
+					label = "Layer 20: 2 answers (English, French)",
+					hosts = 2,
+					target = { kind = "layer", zone = 20 },
+				},
+				{ label = "Layer 30: 1 answer", hosts = 1, target = { kind = "layer", zone = 30 } },
+			}, rows)
+		end)
+
+		it("returns no rows with no offers", function()
+			assert.are.same({}, L.Rows({}, req, me))
+		end)
 	end)
 
 	describe("CanHost", function()
